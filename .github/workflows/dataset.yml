@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # مجوز رسمی کامیت در ریپازیتوری و ساخت Release
+  contents: write
 
 jobs:
   curate-dataset:
@@ -17,7 +17,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ۱. راه‌اندازی وارپ و وایرپروکسی برای چرخش آی‌پی
       - name: Setup Cloudflare WARP & Wireproxy
         run: |
           curl -fsSL https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -o wgcf
@@ -34,7 +33,7 @@ jobs:
           echo "Initial IP:"
           curl -s -x socks5://127.0.0.1:40000 https://api.ipify.org
 
-      - name: Setup Node.js (JS Challenge Solver)
+      - name: Setup Node.js (for YouTube JS challenges)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -44,7 +43,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Dependencies
+      - name: Install System Tools & Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
@@ -55,30 +54,27 @@ jobs:
         run: |
           if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
             echo "${{ secrets.YOUTUBE_COOKIES }}" | base64 -d > cookies.txt
-            echo "Loaded cookies from secret."
+            echo "Loaded cookies."
           fi
 
-      # ۲. اجرای موتور هوشمند با آستانه ۹۵٪
       - name: Run Pipeline
         run: |
           python cloud_downloader.py
 
-      # ۳. کامیت و پوش مانیفست و لاگ‌ها مستقیم داخل ریپازیتوری Main
-      - name: Commit Manifest & Reports to Main Branch
+      - name: Commit Manifest to Main Branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Trade_Dataset_281/dataset_manifest.jsonl pipeline_execution.log || true
-          git commit -m "Auto-update: Dataset Manifest & Execution Log [skip ci]" || echo "No changes to commit"
+          git commit -m "Auto-update: Verified Dataset Manifest [skip ci]" || echo "No changes"
           git push origin main || echo "Git push skipped"
 
-      # ۴. ساخت خودکار یک GitHub Release و ذخیره زیپ‌های ۴ گانه
       - name: Create GitHub Release with Dataset ZIPs
         uses: softprops/action-gh-release@v2
         if: always()
         with:
           tag_name: dataset-v1.0-${{ github.run_number }}
-          name: "Trading Multimodal Dataset (>=95% Verified)"
+          name: "Trading Dataset 281 (>=95% Verified)"
           draft: false
           prerelease: false
           files: |
