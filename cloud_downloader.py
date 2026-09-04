@@ -10,7 +10,6 @@ import subprocess
 from pathlib import Path
 import yt_dlp
 
-# ================= پیکربندی لاگ‌گیری پیشرفته =================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -25,7 +24,6 @@ BASE_DIR = Path("Trade_Dataset_281")
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 MANIFEST_FILE = BASE_DIR / "dataset_manifest.jsonl"
 
-# تنظیمات ضدهرزنامه و شبیه‌سازی اپلیکیشن رسمی برای فرار از مسدودی
 YTDL_BASE_CONFIG = {
     "socket_timeout": 30,
     "retries": 15,
@@ -40,7 +38,6 @@ YTDL_BASE_CONFIG = {
     }
 }
 
-# لیست ۲۸۱ ویدیوی آموزشی
 VIDEOS_DATA = {
     "PL1_Strategy": [
         "https://www.youtube.com/watch?v=5RtgblzXQ7E",
@@ -295,7 +292,6 @@ VIDEOS_DATA = {
         "https://www.youtube.com/watch?v=NYVBTbdIjfQ",
         "https://www.youtube.com/watch?v=x-K7LzbF-U0",
         "https://www.youtube.com/watch?v=Aj7mAzGHB3Y",
-        "https://www.youtube.com/watch?v=紊W6AwdYVdrk",
         "https://www.youtube.com/watch?v=WP9-kSm4DbM",
         "https://www.youtube.com/watch?v=UYIBDJkh5O0",
         "https://www.youtube.com/watch?v=8SqhmxQSfNY",
@@ -337,7 +333,6 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()[:70]
 
 def clean_subtitles(srt_path: Path) -> list:
-    """پالایش زیرنویس و حذف تگ‌های زائد برای ورودی استاندارد مدل‌های زبانی"""
     if not srt_path.exists():
         return []
     cleaned_entries = []
@@ -356,9 +351,7 @@ def clean_subtitles(srt_path: Path) -> list:
 
 def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> dict:
     logger.info(f"[{idx}/{total}] Processing: {url}")
-    
-    # اعمال تاخیر رندوم (Jitter) بین درخواست‌ها جهت حفظ رفتار طبیعی
-    time.sleep(random.uniform(2.0, 4.5))
+    time.sleep(random.uniform(1.5, 3.5))
 
     try:
         with yt_dlp.YoutubeDL(YTDL_BASE_CONFIG) as ydl:
@@ -375,13 +368,13 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
     done_marker = video_dir / ".completed"
 
     if done_marker.exists():
-        logger.info(f"  -> Already exists and verified. Skipping {video_id}.")
+        logger.info(f"  -> Already exists. Skipping {video_id}.")
         return {"status": "skipped", "video_id": video_id}
 
     video_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # ۱. دانلود باکیفیت‌ترین صوت فشرده + زیرنویس و متادیتا
+        # ۱. دانلود فایل صوتی، متادیتا و زیرنویس
         opts_audio = dict(YTDL_BASE_CONFIG)
         opts_audio.update({
             "format": "ba[ext=m4a]/ba/b",
@@ -406,7 +399,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
                 sub_entries = clean_subtitles(s_dest)
                 break
 
-        # ۲. دانلود موقت ۳۶۰p برای استخراج چارت‌ها
+        # ۲. دانلود موقت ۳۶۰p
         temp_vid = video_dir / "temp_video.mp4"
         keyframes_dir = video_dir / "02_keyframes"
         keyframes_dir.mkdir(exist_ok=True)
@@ -419,8 +412,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         with yt_dlp.YoutubeDL(opts_video) as ydl:
             ydl.download([url])
 
-        # ۳. استخراج کی‌فریم هر ۳۰ ثانیه با متادیتا و تایم‌استمپ دقیق
-        # نام‌گذاری: frame_000030s.jpg, frame_000060s.jpg
+        # ۳. استخراج کی‌فریم هر ۳۰ ثانیه
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", str(temp_vid),
@@ -430,7 +422,6 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         ]
         subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-        # نام‌گذاری مجدد فریم‌ها جهت انطباق با ثانیه واقعی ویدیو
         frames = sorted(keyframes_dir.glob("*.jpg"))
         for f_idx, f_path in enumerate(frames, start=1):
             sec = f_idx * 30
@@ -441,7 +432,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
 
         done_marker.touch()
 
-        # ثبت رکورد مانیفست
+        # ثبت رکورد همگام‌سازی مانیفست
         manifest_record = {
             "video_id": video_id,
             "title": raw_title,
@@ -481,7 +472,6 @@ def main():
                 stats[res["status"]] += 1
             counter += 1
 
-    # ذخیره گزارش آماری نهایی
     with open("pipeline_report.json", "w", encoding="utf-8") as rf:
         json.dump(stats, rf, indent=4)
 
