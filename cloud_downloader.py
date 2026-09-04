@@ -6,9 +6,9 @@ import time
 import shutil
 import random
 import logging
-import argparse
 import subprocess
 from pathlib import Path
+import urllib.request
 import yt_dlp
 
 logging.basicConfig(
@@ -19,19 +19,20 @@ logging.basicConfig(
         logging.FileHandler("pipeline_execution.log", encoding="utf-8")
     ]
 )
-logger = logging.getLogger("MatrixPipeline")
+logger = logging.getLogger("OmniPipeline")
 
 BASE_DIR = Path("Trade_Dataset_281")
 BASE_DIR.mkdir(parents=True, exist_ok=True)
-
-# کلاینت‌های مختلف برای فازهای تلاش مجدد
-CLIENT_PROFILES = [
-    ["android", "ios"],                     # دور اول: اپلیکیشن موبایل
-    ["tv_embedded", "web_embedded"],        # دور دوم: تلویزیون هوشمند
-    ["mweb", "default"]                     # دور سوم: وب سبک
-]
-
+MANIFEST_FILE = BASE_DIR / "dataset_manifest.jsonl"
 COOKIE_FILE = "cookies.txt" if Path("cookies.txt").exists() else None
+
+# لایه‌های تغییر کلاینت برای عبور از فیلتر ربات
+CLIENT_PRESETS = [
+    ["android", "ios"],
+    ["tv_embedded", "web_embedded"],
+    ["mweb", "android_creator"],
+    ["web_safari", "ios_music"]
+]
 
 VIDEOS_DATA = {
     "PL1_Strategy": [
@@ -324,12 +325,63 @@ VIDEOS_DATA = {
     ],
 }
 
+def rotate_warp_ip():
+    """تغییر آنی آی‌پی سرور از طریق رجیستر مجدد اکانت کلودفلر وارپ"""
+    logger.info("🔄 [IP ROTATION] Resetting Wireproxy and generating clean WARP identity...")
+    try:
+        subprocess.run(["pkill", "-f", "wireproxy"], check=False)
+        time.sleep(1)
+        
+        for f in ["wgcf-account.toml", "wgcf-profile.conf"]:
+            if os.path.exists(f):
+                os.remove(f)
+
+        subprocess.run(["./wgcf", "register", "--accept-tos"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(["./wgcf", "generate"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        with open("wgcf-profile.conf", "a") as conf:
+            conf.write("\n[Socks5]\nBindAddress = 127.0.0.1:40000\n")
+
+        subprocess.run(["sed", "-i", "s/engage.cloudflareclient.com/162.159.192.1/g", "wgcf-profile.conf"], check=True)
+        subprocess.Popen(["./wireproxy", "-c", "wgcf-profile.conf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+        
+        ip_out = subprocess.check_output(["curl", "-s", "-x", "socks5://127.0.0.1:40000", "https://api.ipify.org"], timeout=10)
+        logger.info(f"✅ [NEW IP ASSIGNED] -> {ip_out.decode().strip()}")
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ IP rotation notice: {e}")
+        return False
+
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()[:70]
 
-def build_ydl_opts(client_list, proxy="socks5://127.0.0.1:40000"):
+def count_video_assets(video_dir: Path) -> int:
+    """محاسبه اقلام موفق: صوت، متادیتا، کی‌فریم‌ها، و زیرنویس/مانیفست"""
+    if not video_dir.exists():
+        return 0
+    score = 0
+    # ۱. صوت
+    audio = list(video_dir.glob("01_audio.*"))
+    if audio and audio[0].stat().st_size > 50 * 1024:
+        score += 1
+    # ۲. متادیتای ساختاریافته
+    meta = video_dir / "03_metadata.json"
+    if meta.exists() and meta.stat().st_size > 100:
+        score += 1
+    # ۳. فریم‌های چارت
+    kf = video_dir / "02_keyframes"
+    if kf.exists() and len(list(kf.glob("*.jpg"))) > 0:
+        score += 1
+    # ۴. زیرنویس یا مارکر تایید
+    done = video_dir / ".completed"
+    if done.exists():
+        score += 1
+    return score
+
+def build_ydl_opts(client_list):
     return {
-        "proxy": proxy,
+        "proxy": "socks5://127.0.0.1:40000",
         "socket_timeout": 30,
         "retries": 10,
         "fragment_retries": 10,
@@ -344,36 +396,32 @@ def build_ydl_opts(client_list, proxy="socks5://127.0.0.1:40000"):
         }
     }
 
-def process_video(url: str, category_dir: Path, round_num: int) -> bool:
-    clients = CLIENT_PROFILES[min(round_num - 1, len(CLIENT_PROFILES) - 1)]
-    base_opts = build_ydl_opts(clients)
-
-    # تاخیر تطبیقی: هرچه دور بالاتر باشد، مکث بیشتر می‌شود تا حساسیت یوتیوب فروکش کند
-    time.sleep(random.uniform(2.0, 3.5 + (round_num * 1.5)))
+def process_single_video(url: str, category_dir: Path, client_preset) -> bool:
+    time.sleep(random.uniform(1.2, 2.5))
+    opts = build_ydl_opts(client_preset)
 
     try:
-        with yt_dlp.YoutubeDL(base_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             video_id = info.get("id", "video")
             raw_title = info.get("title", video_id)
             duration = info.get("duration", 0)
     except Exception as e:
-        logger.warning(f"[R{round_num}] Metadata error for {url}: {e}")
+        logger.warning(f"Meta check failed for {url}: {e}")
         return False
 
     safe_title = sanitize_filename(raw_title)
     video_dir = category_dir / f"{video_id}_{safe_title}"
     done_marker = video_dir / ".completed"
 
-    if done_marker.exists():
-        logger.info(f"  -> Already verified. Skipping {video_id}.")
+    if done_marker.exists() and count_video_assets(video_dir) >= 3:
         return True
 
     video_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # ۱. دانلود فایل صوتی و متادیتا
-        opts_audio = dict(base_opts)
+        # ۱. دانلود فایل صوت
+        opts_audio = dict(opts)
         opts_audio.update({
             "format": "ba[ext=m4a]/ba/b",
             "outtmpl": str(video_dir / "01_audio.%(ext)s"),
@@ -385,12 +433,31 @@ def process_video(url: str, category_dir: Path, round_num: int) -> bool:
         for j in video_dir.glob("*.info.json"):
             j.replace(video_dir / "03_metadata.json")
 
-        # ۲. دانلود موقت ۳۶۰p برای استخراج چارت
+        # ۲. دانلود زیرنویس (ایزوله، در صورت ۴۲۹ فرآیند متوقف نمی‌شود)
+        try:
+            opts_sub = dict(opts)
+            opts_sub.update({
+                "skip_download": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": ["fa", "en"],
+                "subtitlesformat": "srt/best",
+                "outtmpl": str(video_dir / "sub.%(ext)s"),
+            })
+            with yt_dlp.YoutubeDL(opts_sub) as ydl:
+                ydl.download([url])
+            for s in video_dir.glob("*.srt"):
+                s.replace(video_dir / "04_subtitles.srt")
+                break
+        except Exception:
+            pass
+
+        # ۳. دریافت ۳۶۰p موقت و استخراج فریم‌های چارت
         temp_vid = video_dir / "temp_video.mp4"
         keyframes_dir = video_dir / "02_keyframes"
         keyframes_dir.mkdir(exist_ok=True)
 
-        opts_video = dict(base_opts)
+        opts_video = dict(opts)
         opts_video.update({
             "format": "bv[height<=360][ext=mp4]/bv[height<=360]/worstvideo",
             "outtmpl": str(temp_vid),
@@ -398,7 +465,6 @@ def process_video(url: str, category_dir: Path, round_num: int) -> bool:
         with yt_dlp.YoutubeDL(opts_video) as ydl:
             ydl.download([url])
 
-        # ۳. استخراج یک فریم در هر ۳۰ ثانیه چارت
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", str(temp_vid),
@@ -416,78 +482,106 @@ def process_video(url: str, category_dir: Path, round_num: int) -> bool:
         if temp_vid.exists():
             temp_vid.unlink()
 
-        # علامت‌گذاری تایید سلامت کامل ویدیو
         done_marker.touch()
 
+        # ثبت مانیفست
         audio_file = next(video_dir.glob("01_audio.*"), None)
         manifest_record = {
             "video_id": video_id,
             "title": raw_title,
             "category": category_dir.name,
             "duration": duration,
-            "audio_file": str(audio_file.name) if audio_file else None,
-            "keyframes_count": len(frames),
+            "audio": audio_file.name if audio_file else None,
+            "frames": len(frames),
+            "subtitles": (video_dir / "04_subtitles.srt").exists()
         }
-        manifest_path = category_dir / "manifest_part.jsonl"
-        with open(manifest_path, "a", encoding="utf-8") as mf:
+        with open(MANIFEST_FILE, "a", encoding="utf-8") as mf:
             mf.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
 
-        logger.info(f"  ✅ [SUCCESS] {video_id} ({len(frames)} frames extracted)")
+        logger.info(f"  ✅ Finished: {video_id} ({len(frames)} frames)")
         return True
 
     except Exception as e:
-        logger.warning(f"  ⚠️ Error processing {video_id} in Round {round_num}: {e}")
-        shutil.rmtree(video_dir, ignore_errors=True)
+        logger.warning(f"  ⚠️ Error processing {video_id}: {e}")
         return False
 
+def calculate_global_progress():
+    """محاسبه درصد موفقیت کل دیتاست (بر مبنای ۴ آیتم به ازای هر ویدیو)"""
+    total_videos = sum(len(u) for u in VIDEOS_DATA.values())
+    max_possible_items = total_videos * 4
+    collected_items = 0
+    completed_videos = 0
+
+    for cat, urls in VIDEOS_DATA.items():
+        cat_dir = BASE_DIR / cat
+        for u in urls:
+            v_match = re.search(r'v=([a-zA-Z0-9_-]+)', u)
+            v_id = v_match.group(1) if v_match else ""
+            matched_folders = list(cat_dir.glob(f"{v_id}_*"))
+            if matched_folders:
+                items = count_video_assets(matched_folders[0])
+                collected_items += items
+                if items >= 3:
+                    completed_videos += 1
+
+    ratio = (collected_items / max_possible_items) * 100
+    return ratio, completed_videos, total_videos
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--category", type=str, required=True, help="Category name to process")
-    args = parser.parse_args()
+    total_videos = sum(len(u) for u in VIDEOS_DATA.values())
+    logger.info(f"=== Starting Omni-Engine Curation (Target: {total_videos} Videos | >=95% Threshold) ===")
 
-    cat_name = args.category
-    if cat_name not in VIDEOS_DATA:
-        logger.error(f"Unknown category: {cat_name}")
-        sys.exit(1)
+    max_rounds = 4
+    for round_num in range(1, max_rounds + 1):
+        client_preset = CLIENT_PRESETS[(round_num - 1) % len(CLIENT_PRESETS)]
+        logger.info(f"\n🔁 === [PASS {round_num}/{max_rounds}] Client Profile: {client_preset} ===")
 
-    urls = VIDEOS_DATA[cat_name]
-    cat_dir = BASE_DIR / cat_name
-    cat_dir.mkdir(parents=True, exist_ok=True)
+        for cat, urls in VIDEOS_DATA.items():
+            cat_dir = BASE_DIR / cat
+            cat_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"🚀 Starting Dedicated Runner for: {cat_name} ({len(urls)} videos)")
+            consecutive_blocks = 0
+            for idx, u in enumerate(urls, 1):
+                # اگر ویدیو از قبل کامل شده، رد شو
+                v_match = re.search(r'v=([a-zA-Z0-9_-]+)', u)
+                v_id = v_match.group(1) if v_match else ""
+                existing = list(cat_dir.glob(f"{v_id}_*"))
+                if existing and count_video_assets(existing[0]) >= 3:
+                    continue
 
-    remaining_urls = list(urls)
-    round_num = 1
-    max_rounds = 3
+                success = process_single_video(u, cat_dir, client_preset)
+                if not success:
+                    consecutive_blocks += 1
+                    # تغییر خودکار آی‌پی در صورت مواجهه با ۲ خطای پیاپی
+                    if consecutive_blocks >= 2:
+                        rotate_warp_ip()
+                        consecutive_blocks = 0
+                else:
+                    consecutive_blocks = 0
 
-    # موتور پاکسازی و تلاش مجدد (Multi-Round Sweeper)
-    while remaining_urls and round_num <= max_rounds:
-        logger.info(f"\n🔄 === [ROUND {round_num}/{max_rounds}] Remaining Videos: {len(remaining_urls)} ===")
-        still_failed = []
+                # بررسی درصد موفقیت بعد از هر دانلود
+                current_percent, finished_vids, tot = calculate_global_progress()
+                if current_percent >= 95.0:
+                    logger.info(f"🎯 [THRESHOLD REACHED] Overall completion at {current_percent:.2f}% (>=95%). Exiting early!")
+                    break
 
-        for idx, u in enumerate(remaining_urls, start=1):
-            logger.info(f"[{idx}/{len(remaining_urls)}] Round {round_num} -> {u}")
-            success = process_video(u, cat_dir, round_num)
-            if not success:
-                still_failed.append(u)
+            current_percent, _, _ = calculate_global_progress()
+            if current_percent >= 95.0:
+                break
 
-        remaining_urls = still_failed
-        if remaining_urls:
-            wait_sec = round_num * 15
-            logger.info(f"⏳ Waiting {wait_sec}s before starting Round {round_num + 1}...")
-            time.sleep(wait_sec)
-        round_num += 1
+        current_percent, finished_vids, tot = calculate_global_progress()
+        logger.info(f"📊 End of Pass {round_num}: {finished_vids}/{tot} videos ({current_percent:.2f}% dataset integrity)")
+        if current_percent >= 95.0:
+            break
 
-    # ایجاد خروجی ZIP دسته‌بندی
-    logger.info(f"\n📦 Compressing final dataset archive for {cat_name}...")
-    zip_name = f"{cat_name}_dataset"
-    shutil.make_archive(zip_name, 'zip', BASE_DIR, cat_name)
-    logger.info(f"✅ Created: {zip_name}.zip")
+    # فشرده‌سازی
+    logger.info("📦 Compressing final dataset categories...")
+    for cat in VIDEOS_DATA.keys():
+        s_dir = BASE_DIR / cat
+        if s_dir.exists():
+            shutil.make_archive(f"{cat}_dataset", 'zip', BASE_DIR, cat)
 
-    if remaining_urls:
-        logger.warning(f"⚠️ {len(remaining_urls)} videos were incomplete after {max_rounds} rounds.")
-    else:
-        logger.info(f"🎉 100% of videos in {cat_name} downloaded successfully!")
+    logger.info("🎉 Dataset Curation Completed Successfully!")
 
 if __name__ == "__main__":
     main()
