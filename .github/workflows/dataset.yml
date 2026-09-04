@@ -1,23 +1,24 @@
-name: Parallel Multimodal Dataset Curation
+name: Multimodal Dataset Curation
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write # مجوز رسمی کامیت در ریپازیتوری و ساخت Release
+
 jobs:
-  curate-category:
+  curate-dataset:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    strategy:
-      fail-fast: false # اگر یک دسته موقتاً خطا داد، دسته‌های دیگر متوقف نشوند
-      matrix:
-        category: [PL1_Strategy, PL2_Bullrun, PL3_Basic, PL4_Intermediate]
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # ۱. راه‌اندازی پروکسی وارپ با آی‌پی جدید اختصاصی برای این سرور
-      - name: Setup Cloudflare WARP SOCKS5 Proxy
+      # ۱. راه‌اندازی وارپ و وایرپروکسی برای چرخش آی‌پی
+      - name: Setup Cloudflare WARP & Wireproxy
         run: |
           curl -fsSL https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -o wgcf
           chmod +x wgcf
@@ -30,11 +31,10 @@ jobs:
           
           ./wireproxy -c wgcf-profile.conf &
           sleep 4
-          echo "✅ Runner Public SOCKS5 IP:"
+          echo "Initial IP:"
           curl -s -x socks5://127.0.0.1:40000 https://api.ipify.org
 
-      # ۲. آماده‌سازی نود و پایتون
-      - name: Setup Node.js (for YouTube JS Challenges)
+      - name: Setup Node.js (JS Challenge Solver)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -44,31 +44,47 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install System Tools & Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           pip install "yt-dlp[default]"
 
-      # ۳. بارگذاری کوکی اختیاری در صورت وجود در سکرت‌ها
       - name: Load Cookies (Optional)
         run: |
           if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
             echo "${{ secrets.YOUTUBE_COOKIES }}" | base64 -d > cookies.txt
-            echo "✅ Loaded YOUTUBE_COOKIES secret"
+            echo "Loaded cookies from secret."
           fi
 
-      # ۴. اجرای پردازش موازی منحصراً برای همین دسته‌بندی ماتریکس
-      - name: Execute Category Pipeline
+      # ۲. اجرای موتور هوشمند با آستانه ۹۵٪
+      - name: Run Pipeline
         run: |
-          python cloud_downloader.py --category ${{ matrix.category }}
+          python cloud_downloader.py
 
-      # ۵. آپلود آرشیو کامل این دسته‌بندی
-      - name: Upload ${{ matrix.category }} ZIP Artifact
-        uses: actions/upload-artifact@v4
+      # ۳. کامیت و پوش مانیفست و لاگ‌ها مستقیم داخل ریپازیتوری Main
+      - name: Commit Manifest & Reports to Main Branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Trade_Dataset_281/dataset_manifest.jsonl pipeline_execution.log || true
+          git commit -m "Auto-update: Dataset Manifest & Execution Log [skip ci]" || echo "No changes to commit"
+          git push origin main || echo "Git push skipped"
+
+      # ۴. ساخت خودکار یک GitHub Release و ذخیره زیپ‌های ۴ گانه
+      - name: Create GitHub Release with Dataset ZIPs
+        uses: softprops/action-gh-release@v2
         if: always()
         with:
-          name: ${{ matrix.category }}_Dataset
-          path: ${{ matrix.category }}_dataset.zip
-          retention-days: 14
+          tag_name: dataset-v1.0-${{ github.run_number }}
+          name: "Trading Multimodal Dataset (>=95% Verified)"
+          draft: false
+          prerelease: false
+          files: |
+            PL1_Strategy_dataset.zip
+            PL2_Bullrun_dataset.zip
+            PL3_Basic_dataset.zip
+            PL4_Intermediate_dataset.zip
+            Trade_Dataset_281/dataset_manifest.jsonl
+            pipeline_execution.log
