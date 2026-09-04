@@ -24,18 +24,22 @@ BASE_DIR = Path("Trade_Dataset_281")
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 MANIFEST_FILE = BASE_DIR / "dataset_manifest.jsonl"
 
-# خط ۲۴ فایل cloud_downloader.py را با این بخش جایگزین کنید:
+# بررسی وجود فایل کوکی (در صورت وجود، جهت عبور از لیمیت‌ها لود می‌شود)
+COOKIE_FILE = "cookies.txt" if Path("cookies.txt").exists() else None
+
+# پیکربندی پیشرفته yt-dlp مطابق الگوی مخازن معتبر ضد-ربات
 YTDL_BASE_CONFIG = {
-    "proxy": "socks5://127.0.0.1:40000",  # اتصال به پروکسی فعال کلودفلر
+    "proxy": "socks5://127.0.0.1:40000",
     "socket_timeout": 30,
     "retries": 15,
     "fragment_retries": 15,
     "continuedl": True,
     "quiet": True,
     "no_warnings": True,
+    "cookiefile": COOKIE_FILE,
     "extractor_args": {
         "youtube": {
-            "player_client": ["android", "ios", "mweb"]
+            "player_client": ["default", "-tv_downgraded", "web_embedded"]
         }
     }
 }
@@ -353,8 +357,9 @@ def clean_subtitles(srt_path: Path) -> list:
 
 def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> dict:
     logger.info(f"[{idx}/{total}] Processing: {url}")
-    time.sleep(random.uniform(1.5, 3.5))
+    time.sleep(random.uniform(1.5, 3.0))
 
+    # ۱. استخراج متادیتای اولیه
     try:
         with yt_dlp.YoutubeDL(YTDL_BASE_CONFIG) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -370,22 +375,18 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
     done_marker = video_dir / ".completed"
 
     if done_marker.exists():
-        logger.info(f"  -> Already exists. Skipping {video_id}.")
+        logger.info(f"  -> Already completed. Skipping {video_id}.")
         return {"status": "skipped", "video_id": video_id}
 
     video_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # ۱. دانلود فایل صوتی، متادیتا و زیرنویس
+        # ۲. دانلود صوت و متادیتای JSON (بدون درخواست زیرنویس تا ارور ۴۲۹ ایجاد نشود)
         opts_audio = dict(YTDL_BASE_CONFIG)
         opts_audio.update({
             "format": "ba[ext=m4a]/ba/b",
             "outtmpl": str(video_dir / "01_audio.%(ext)s"),
             "writeinfojson": True,
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": ["fa", "en"],
-            "subtitlesformat": "srt/best",
         })
         with yt_dlp.YoutubeDL(opts_audio) as ydl:
             ydl.download([url])
@@ -393,15 +394,30 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         for j in video_dir.glob("*.info.json"):
             j.replace(video_dir / "03_metadata.json")
 
+        # ۳. دانلود زیرنویس در یک ترای-اکسپت مستقل و کاملاً امن (در صورت ۴۲۹ ویدیو سالم می‌ماند)
         sub_entries = []
-        for s in video_dir.glob("*.srt"):
-            if s.name != "04_subtitles.srt":
+        try:
+            opts_sub = dict(YTDL_BASE_CONFIG)
+            opts_sub.update({
+                "skip_download": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": ["fa", "en"],
+                "subtitlesformat": "srt/best",
+                "outtmpl": str(video_dir / "sub_temp.%(ext)s"),
+            })
+            with yt_dlp.YoutubeDL(opts_sub) as ydl:
+                ydl.download([url])
+
+            for s in video_dir.glob("*.srt"):
                 s_dest = video_dir / "04_subtitles.srt"
                 s.replace(s_dest)
                 sub_entries = clean_subtitles(s_dest)
                 break
+        except Exception as sub_err:
+            logger.warning(f"  ⚠️ Subtitle 429/Not available for {video_id} (Skipping subtitles only): {sub_err}")
 
-        # ۲. دانلود موقت ۳۶۰p
+        # ۴. دانلود موقت ۳۶۰p برای استخراج کی‌فریم چارت
         temp_vid = video_dir / "temp_video.mp4"
         keyframes_dir = video_dir / "02_keyframes"
         keyframes_dir.mkdir(exist_ok=True)
@@ -414,7 +430,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         with yt_dlp.YoutubeDL(opts_video) as ydl:
             ydl.download([url])
 
-        # ۳. استخراج کی‌فریم هر ۳۰ ثانیه
+        # ۵. استخراج فریم هر ۳۰ ثانیه چارت با FFmpeg
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", str(temp_vid),
@@ -432,15 +448,16 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         if temp_vid.exists():
             temp_vid.unlink()
 
+        # ثبت وضعیت نهایی
         done_marker.touch()
 
-        # ثبت رکورد همگام‌سازی مانیفست
+        audio_file = next(video_dir.glob("01_audio.*"), None)
         manifest_record = {
             "video_id": video_id,
             "title": raw_title,
             "category": category_dir.name,
             "duration": duration,
-            "audio_file": str(next(video_dir.glob("01_audio.*")).name),
+            "audio_file": str(audio_file.name) if audio_file else None,
             "keyframes_count": len(frames),
             "has_subtitles": len(sub_entries) > 0,
             "subtitles_preview": sub_entries[:3]
@@ -448,7 +465,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         with open(MANIFEST_FILE, "a", encoding="utf-8") as mf:
             mf.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
 
-        logger.info(f"  ✅ Finished: {video_id} ({len(frames)} frames synchronized)")
+        logger.info(f"  ✅ Finished: {video_id} ({len(frames)} frames synchronized | Subs: {len(sub_entries) > 0})")
         return {"status": "success", "video_id": video_id}
 
     except Exception as e:
