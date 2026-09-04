@@ -12,35 +12,44 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ۱. تغییر آی‌پی سرور گیت‌هاب به یک آی‌پی غیردیتاسنتری با WireGuard
-      - name: Setup WARP IP Masking (WireGuard)
+      # ۱. راه‌اندازی WARP در قالب پروکسی SOCKS5 محلی (بدون قطع اینترنت رانر)
+      - name: Setup Cloudflare WARP SOCKS5 Proxy
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y wireguard-tools resolvconf
           curl -fsSL https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -o wgcf
           chmod +x wgcf
           ./wgcf register --accept-tos
           ./wgcf generate
-          sudo sed -i 's/engage.cloudflareclient.com/162.159.192.1/g' wgcf-profile.conf
-          sudo cp wgcf-profile.conf /etc/wireguard/wgcf.conf
-          sudo wg-quick up wgcf
-          echo "✅ New Public IP:"
-          curl -s https://api.ipify.org
+          
+          # دانلود ابزار wireproxy جهت تبدیل کانفیگ وایرگارد به SOCKS5
+          curl -fsSL https://github.com/octeep/wireproxy/releases/download/v1.0.9/wireproxy_linux_amd64.tar.gz | tar -xz
+          
+          # تنظیم پورت ساکس روی 40000
+          echo -e "\n[Socks5]\nBindAddress = 127.0.0.1:40000" >> wgcf-profile.conf
+          sed -i 's/engage.cloudflareclient.com/162.159.192.1/g' wgcf-profile.conf
+          
+          # اجرای سرویس پروکسی در پس‌زمینه
+          ./wireproxy -c wgcf-profile.conf &
+          sleep 4
+          
+          # تست پایداری پروکسی و استعلام آی‌پی جدید
+          echo "✅ WARP SOCKS5 Proxy IP:"
+          curl -s -x socks5://127.0.0.1:40000 https://api.ipify.org
 
-      # ۲. آماده‌سازی پایتون (بدون کش جهت جلوگیری از ارور نبود requirements.txt)
+      # ۲. آماده‌سازی پایتون
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ۳. نصب ابزارهای پردازش مدیا و پکیج‌ها
+      # ۳. نصب پکیج‌ها
       - name: Install System & Python Tools
         run: |
+          sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           pip install "yt-dlp[default]"
 
-      # ۴. اجرای اسکریپت دانلود و استخراج فریم
+      # ۴. اجرای اسکریپت با پروکسی امن
       - name: Execute Pipeline
         run: |
           python cloud_downloader.py
@@ -57,7 +66,7 @@ jobs:
             Trade_Dataset_281/dataset_manifest.jsonl
           retention-days: 30
 
-      # ۶. ذخیره آرشیوهای نهایی
+      # ۶. ذخیره آرشیوهای ۴ گانه
       - name: Upload PL1_Strategy ZIP
         uses: actions/upload-artifact@v4
         if: always()
