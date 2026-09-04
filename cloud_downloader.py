@@ -6,6 +6,7 @@ import time
 import shutil
 import random
 import logging
+import argparse
 import subprocess
 from pathlib import Path
 import yt_dlp
@@ -18,31 +19,19 @@ logging.basicConfig(
         logging.FileHandler("pipeline_execution.log", encoding="utf-8")
     ]
 )
-logger = logging.getLogger("DatasetPipeline")
+logger = logging.getLogger("MatrixPipeline")
 
 BASE_DIR = Path("Trade_Dataset_281")
 BASE_DIR.mkdir(parents=True, exist_ok=True)
-MANIFEST_FILE = BASE_DIR / "dataset_manifest.jsonl"
 
-# بررسی وجود فایل کوکی (در صورت وجود، جهت عبور از لیمیت‌ها لود می‌شود)
+# کلاینت‌های مختلف برای فازهای تلاش مجدد
+CLIENT_PROFILES = [
+    ["android", "ios"],                     # دور اول: اپلیکیشن موبایل
+    ["tv_embedded", "web_embedded"],        # دور دوم: تلویزیون هوشمند
+    ["mweb", "default"]                     # دور سوم: وب سبک
+]
+
 COOKIE_FILE = "cookies.txt" if Path("cookies.txt").exists() else None
-
-# پیکربندی پیشرفته yt-dlp مطابق الگوی مخازن معتبر ضد-ربات
-YTDL_BASE_CONFIG = {
-    "proxy": "socks5://127.0.0.1:40000",
-    "socket_timeout": 30,
-    "retries": 15,
-    "fragment_retries": 15,
-    "continuedl": True,
-    "quiet": True,
-    "no_warnings": True,
-    "cookiefile": COOKIE_FILE,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["default", "-tv_downgraded", "web_embedded"]
-        }
-    }
-}
 
 VIDEOS_DATA = {
     "PL1_Strategy": [
@@ -338,51 +327,53 @@ VIDEOS_DATA = {
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()[:70]
 
-def clean_subtitles(srt_path: Path) -> list:
-    if not srt_path.exists():
-        return []
-    cleaned_entries = []
-    try:
-        content = srt_path.read_text(encoding="utf-8", errors="ignore")
-        pattern = re.compile(r'(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\n|\Z)')
-        for match in pattern.finditer(content):
-            _, start, end, text = match.groups()
-            cleaned_text = re.sub(r'<[^>]+>', '', text)
-            cleaned_text = ' '.join(cleaned_text.split())
-            if cleaned_text:
-                cleaned_entries.append({"start": start, "end": end, "text": cleaned_text})
-    except Exception as e:
-        logger.warning(f"Error parsing subtitles {srt_path.name}: {e}")
-    return cleaned_entries
+def build_ydl_opts(client_list, proxy="socks5://127.0.0.1:40000"):
+    return {
+        "proxy": proxy,
+        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "continuedl": True,
+        "quiet": True,
+        "no_warnings": True,
+        "cookiefile": COOKIE_FILE,
+        "extractor_args": {
+            "youtube": {
+                "player_client": client_list
+            }
+        }
+    }
 
-def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> dict:
-    logger.info(f"[{idx}/{total}] Processing: {url}")
-    time.sleep(random.uniform(1.5, 3.0))
+def process_video(url: str, category_dir: Path, round_num: int) -> bool:
+    clients = CLIENT_PROFILES[min(round_num - 1, len(CLIENT_PROFILES) - 1)]
+    base_opts = build_ydl_opts(clients)
 
-    # ۱. استخراج متادیتای اولیه
+    # تاخیر تطبیقی: هرچه دور بالاتر باشد، مکث بیشتر می‌شود تا حساسیت یوتیوب فروکش کند
+    time.sleep(random.uniform(2.0, 3.5 + (round_num * 1.5)))
+
     try:
-        with yt_dlp.YoutubeDL(YTDL_BASE_CONFIG) as ydl:
+        with yt_dlp.YoutubeDL(base_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             video_id = info.get("id", "video")
             raw_title = info.get("title", video_id)
             duration = info.get("duration", 0)
     except Exception as e:
-        logger.error(f"Metadata fetch failed for {url}: {e}")
-        return None
+        logger.warning(f"[R{round_num}] Metadata error for {url}: {e}")
+        return False
 
     safe_title = sanitize_filename(raw_title)
     video_dir = category_dir / f"{video_id}_{safe_title}"
     done_marker = video_dir / ".completed"
 
     if done_marker.exists():
-        logger.info(f"  -> Already completed. Skipping {video_id}.")
-        return {"status": "skipped", "video_id": video_id}
+        logger.info(f"  -> Already verified. Skipping {video_id}.")
+        return True
 
     video_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # ۲. دانلود صوت و متادیتای JSON (بدون درخواست زیرنویس تا ارور ۴۲۹ ایجاد نشود)
-        opts_audio = dict(YTDL_BASE_CONFIG)
+        # ۱. دانلود فایل صوتی و متادیتا
+        opts_audio = dict(base_opts)
         opts_audio.update({
             "format": "ba[ext=m4a]/ba/b",
             "outtmpl": str(video_dir / "01_audio.%(ext)s"),
@@ -394,35 +385,12 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         for j in video_dir.glob("*.info.json"):
             j.replace(video_dir / "03_metadata.json")
 
-        # ۳. دانلود زیرنویس در یک ترای-اکسپت مستقل و کاملاً امن (در صورت ۴۲۹ ویدیو سالم می‌ماند)
-        sub_entries = []
-        try:
-            opts_sub = dict(YTDL_BASE_CONFIG)
-            opts_sub.update({
-                "skip_download": True,
-                "writesubtitles": True,
-                "writeautomaticsub": True,
-                "subtitleslangs": ["fa", "en"],
-                "subtitlesformat": "srt/best",
-                "outtmpl": str(video_dir / "sub_temp.%(ext)s"),
-            })
-            with yt_dlp.YoutubeDL(opts_sub) as ydl:
-                ydl.download([url])
-
-            for s in video_dir.glob("*.srt"):
-                s_dest = video_dir / "04_subtitles.srt"
-                s.replace(s_dest)
-                sub_entries = clean_subtitles(s_dest)
-                break
-        except Exception as sub_err:
-            logger.warning(f"  ⚠️ Subtitle 429/Not available for {video_id} (Skipping subtitles only): {sub_err}")
-
-        # ۴. دانلود موقت ۳۶۰p برای استخراج کی‌فریم چارت
+        # ۲. دانلود موقت ۳۶۰p برای استخراج چارت
         temp_vid = video_dir / "temp_video.mp4"
         keyframes_dir = video_dir / "02_keyframes"
         keyframes_dir.mkdir(exist_ok=True)
 
-        opts_video = dict(YTDL_BASE_CONFIG)
+        opts_video = dict(base_opts)
         opts_video.update({
             "format": "bv[height<=360][ext=mp4]/bv[height<=360]/worstvideo",
             "outtmpl": str(temp_vid),
@@ -430,7 +398,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         with yt_dlp.YoutubeDL(opts_video) as ydl:
             ydl.download([url])
 
-        # ۵. استخراج فریم هر ۳۰ ثانیه چارت با FFmpeg
+        # ۳. استخراج یک فریم در هر ۳۰ ثانیه چارت
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", str(temp_vid),
@@ -448,7 +416,7 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
         if temp_vid.exists():
             temp_vid.unlink()
 
-        # ثبت وضعیت نهایی
+        # علامت‌گذاری تایید سلامت کامل ویدیو
         done_marker.touch()
 
         audio_file = next(video_dir.glob("01_audio.*"), None)
@@ -459,49 +427,67 @@ def process_single_video(url: str, category_dir: Path, idx: int, total: int) -> 
             "duration": duration,
             "audio_file": str(audio_file.name) if audio_file else None,
             "keyframes_count": len(frames),
-            "has_subtitles": len(sub_entries) > 0,
-            "subtitles_preview": sub_entries[:3]
         }
-        with open(MANIFEST_FILE, "a", encoding="utf-8") as mf:
+        manifest_path = category_dir / "manifest_part.jsonl"
+        with open(manifest_path, "a", encoding="utf-8") as mf:
             mf.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
 
-        logger.info(f"  ✅ Finished: {video_id} ({len(frames)} frames synchronized | Subs: {len(sub_entries) > 0})")
-        return {"status": "success", "video_id": video_id}
+        logger.info(f"  ✅ [SUCCESS] {video_id} ({len(frames)} frames extracted)")
+        return True
 
     except Exception as e:
-        logger.error(f"  ❌ Error processing {video_id}: {e}")
+        logger.warning(f"  ⚠️ Error processing {video_id} in Round {round_num}: {e}")
         shutil.rmtree(video_dir, ignore_errors=True)
-        return {"status": "failed", "video_id": video_id, "error": str(e)}
+        return False
 
 def main():
-    total_vids = sum(len(u) for u in VIDEOS_DATA.values())
-    logger.info(f"=== Starting Multimodal Dataset Curation ({total_vids} Videos) ===")
-    
-    stats = {"success": 0, "skipped": 0, "failed": 0}
-    counter = 1
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--category", type=str, required=True, help="Category name to process")
+    args = parser.parse_args()
 
-    for cat_name, urls in VIDEOS_DATA.items():
-        cat_dir = BASE_DIR / cat_name
-        cat_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Entering Category: {cat_name} ({len(urls)} videos)")
+    cat_name = args.category
+    if cat_name not in VIDEOS_DATA:
+        logger.error(f"Unknown category: {cat_name}")
+        sys.exit(1)
 
-        for u in urls:
-            res = process_single_video(u, cat_dir, counter, total_vids)
-            if res:
-                stats[res["status"]] += 1
-            counter += 1
+    urls = VIDEOS_DATA[cat_name]
+    cat_dir = BASE_DIR / cat_name
+    cat_dir.mkdir(parents=True, exist_ok=True)
 
-    with open("pipeline_report.json", "w", encoding="utf-8") as rf:
-        json.dump(stats, rf, indent=4)
+    logger.info(f"🚀 Starting Dedicated Runner for: {cat_name} ({len(urls)} videos)")
 
-    logger.info("=== Compression Phase ===")
-    for cat_name in VIDEOS_DATA.keys():
-        source_dir = BASE_DIR / cat_name
-        if source_dir.exists():
-            shutil.make_archive(f"{cat_name}_dataset", 'zip', BASE_DIR, cat_name)
-            logger.info(f"Created Archive: {cat_name}_dataset.zip")
+    remaining_urls = list(urls)
+    round_num = 1
+    max_rounds = 3
 
-    logger.info(f"Pipeline Completed. Summary: {stats}")
+    # موتور پاکسازی و تلاش مجدد (Multi-Round Sweeper)
+    while remaining_urls and round_num <= max_rounds:
+        logger.info(f"\n🔄 === [ROUND {round_num}/{max_rounds}] Remaining Videos: {len(remaining_urls)} ===")
+        still_failed = []
+
+        for idx, u in enumerate(remaining_urls, start=1):
+            logger.info(f"[{idx}/{len(remaining_urls)}] Round {round_num} -> {u}")
+            success = process_video(u, cat_dir, round_num)
+            if not success:
+                still_failed.append(u)
+
+        remaining_urls = still_failed
+        if remaining_urls:
+            wait_sec = round_num * 15
+            logger.info(f"⏳ Waiting {wait_sec}s before starting Round {round_num + 1}...")
+            time.sleep(wait_sec)
+        round_num += 1
+
+    # ایجاد خروجی ZIP دسته‌بندی
+    logger.info(f"\n📦 Compressing final dataset archive for {cat_name}...")
+    zip_name = f"{cat_name}_dataset"
+    shutil.make_archive(zip_name, 'zip', BASE_DIR, cat_name)
+    logger.info(f"✅ Created: {zip_name}.zip")
+
+    if remaining_urls:
+        logger.warning(f"⚠️ {len(remaining_urls)} videos were incomplete after {max_rounds} rounds.")
+    else:
+        logger.info(f"🎉 100% of videos in {cat_name} downloaded successfully!")
 
 if __name__ == "__main__":
     main()
