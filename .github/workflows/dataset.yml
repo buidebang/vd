@@ -1,0 +1,76 @@
+name: Multimodal Dataset Curation
+
+on:
+  workflow_dispatch: # دکمه اجرای دستی از محیط وب گیت‌هاب
+
+jobs:
+  curate-dataset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # سقف ۶ ساعت اجرای پیوسته
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Latest yt-dlp
+        run: |
+          python -m pip install --upgrade pip
+          pip install "yt-dlp[default]"
+
+      - name: Execute Pipeline
+        run: |
+          python cloud_downloader.py
+
+      - name: Upload Manifest & Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Execution_Logs_and_Manifest
+          path: |
+            pipeline_execution.log
+            pipeline_report.json
+            Trade_Dataset_281/dataset_manifest.jsonl
+          retention-days: 30
+
+      - name: Upload PL1_Strategy ZIP
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PL1_Strategy_Dataset
+          path: PL1_Strategy_dataset.zip
+          retention-days: 14
+
+      - name: Upload PL2_Bullrun ZIP
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PL2_Bullrun_Dataset
+          path: PL2_Bullrun_dataset.zip
+          retention-days: 14
+
+      - name: Upload PL3_Basic ZIP
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PL3_Basic_Dataset
+          path: PL3_Basic_dataset.zip
+          retention-days: 14
+
+      - name: Upload PL4_Intermediate ZIP
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PL4_Intermediate_Dataset
+          path: PL4_Intermediate_dataset.zip
+          retention-days: 14
