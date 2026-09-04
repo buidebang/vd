@@ -1,18 +1,22 @@
-name: Multimodal Dataset Curation
+name: Parallel Multimodal Dataset Curation
 
 on:
   workflow_dispatch:
 
 jobs:
-  curate-dataset:
+  curate-category:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false # اگر یک دسته موقتاً خطا داد، دسته‌های دیگر متوقف نشوند
+      matrix:
+        category: [PL1_Strategy, PL2_Bullrun, PL3_Basic, PL4_Intermediate]
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ۱. راه‌اندازی پروکسی وارپ
+      # ۱. راه‌اندازی پروکسی وارپ با آی‌پی جدید اختصاصی برای این سرور
       - name: Setup Cloudflare WARP SOCKS5 Proxy
         run: |
           curl -fsSL https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64 -o wgcf
@@ -26,11 +30,11 @@ jobs:
           
           ./wireproxy -c wgcf-profile.conf &
           sleep 4
-          echo "✅ WARP SOCKS5 Proxy IP:"
+          echo "✅ Runner Public SOCKS5 IP:"
           curl -s -x socks5://127.0.0.1:40000 https://api.ipify.org
 
-      # ۲. فعال‌سازی نود برای حل چالش‌های جاوااسکریپت یوتیوب (طبق ریپوی ارسالی)
-      - name: Setup Node.js (for YouTube JS challenges)
+      # ۲. آماده‌سازی نود و پایتون
+      - name: Setup Node.js (for YouTube JS Challenges)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -40,66 +44,31 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Tools
+      - name: Install System Tools & Dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           python -m pip install --upgrade pip
           pip install "yt-dlp[default]"
 
-      # ۳. باز کردن کوکی در صورت وجود سکرت YOUTUBE_COOKIES در ریپازیتوری
-      - name: Setup Cookies (Optional)
+      # ۳. بارگذاری کوکی اختیاری در صورت وجود در سکرت‌ها
+      - name: Load Cookies (Optional)
         run: |
           if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
             echo "${{ secrets.YOUTUBE_COOKIES }}" | base64 -d > cookies.txt
-            echo "✅ Loaded YOUTUBE_COOKIES secret into cookies.txt"
+            echo "✅ Loaded YOUTUBE_COOKIES secret"
           fi
 
-      # ۴. اجرای پایپ‌لاین
-      - name: Execute Pipeline
+      # ۴. اجرای پردازش موازی منحصراً برای همین دسته‌بندی ماتریکس
+      - name: Execute Category Pipeline
         run: |
-          python cloud_downloader.py
+          python cloud_downloader.py --category ${{ matrix.category }}
 
-      # ۵. ذخیره فایل‌های خروجی
-      - name: Upload Manifest & Logs
+      # ۵. آپلود آرشیو کامل این دسته‌بندی
+      - name: Upload ${{ matrix.category }} ZIP Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Execution_Logs_and_Manifest
-          path: |
-            pipeline_execution.log
-            pipeline_report.json
-            Trade_Dataset_281/dataset_manifest.jsonl
-          retention-days: 30
-
-      - name: Upload PL1_Strategy ZIP
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: PL1_Strategy_Dataset
-          path: PL1_Strategy_dataset.zip
-          retention-days: 14
-
-      - name: Upload PL2_Bullrun ZIP
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: PL2_Bullrun_Dataset
-          path: PL2_Bullrun_dataset.zip
-          retention-days: 14
-
-      - name: Upload PL3_Basic ZIP
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: PL3_Basic_Dataset
-          path: PL3_Basic_dataset.zip
-          retention-days: 14
-
-      - name: Upload PL4_Intermediate ZIP
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: PL4_Intermediate_Dataset
-          path: PL4_Intermediate_dataset.zip
+          name: ${{ matrix.category }}_Dataset
+          path: ${{ matrix.category }}_dataset.zip
           retention-days: 14
