@@ -24,7 +24,9 @@ BASE_DIR = Path("Trade_Dataset_281")
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 MANIFEST_FILE = BASE_DIR / "dataset_manifest.jsonl"
 
+# خط ۲۴ فایل cloud_downloader.py را با این بخش جایگزین کنید:
 YTDL_BASE_CONFIG = {
+    "proxy": "socks5://127.0.0.1:40000",  # اتصال به پروکسی فعال کلودفلر
     "socket_timeout": 30,
     "retries": 15,
     "fragment_retries": 15,
